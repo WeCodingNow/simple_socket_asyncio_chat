@@ -2,7 +2,7 @@ import socket
 import argparse
 import asyncio
 
-CONN_WAIT_TIME = 1
+CONN_WAIT_TIME = 0.1
 MAX_CONNS = 5
 
 def get_args():
@@ -24,41 +24,64 @@ async def server(q: asyncio.Queue, addr, port):
         await asyncio.sleep(1)
         try:
             conn_addr = s.accept()
+            print('got a conn')
             await q.put(conn_addr)
         except socket.timeout: print('no new conns')
 
 
+# обёртка для того чтобы не работать с исключениями постоянно
+def get_info(s: socket.socket):
+    ret_val = None
+    try:
+        ret_val = s.recv(1024)
+    except socket.timeout: ...
+
+    return ret_val
+
 async def handler(q: asyncio.Queue, context):
-
     while True:
-        read_messages_ptr = 0
-
+        # ждём клиента
         conn, addr = await q.get()
-        name = conn.recv(1024)
-        name = name.decode(encoding='utf-8')
 
-        if name not in context['connected_users']:
-            context['connected_users'].add(name)
-            print(f'{name} connected')
-            conn.send(b'you connected succesfully')
-            conn.settimeout(CONN_WAIT_TIME)
-            # начинаем пересылку сообщений между адресатами
-            while True:
-                try:
-                    messages = conn.recv(1024).decode('utf-8')
-                    for msg in messages.split('\n'):
-                        print(msg)
-                        context['messages'].append(msg)
-                        read_messages_ptr += 1
+        # как нашёлся клиент, начинаем для него сессию чата
+        conn.settimeout(CONN_WAIT_TIME)
 
-                    if read_messages_ptr != len(context['messages']):
-                        for msg in context['messages'][read_messages_ptr:-1]:
-                            conn.send((msg + '\n').encode('utf-8'))
-                except: ...
-                await asyncio.sleep(MAX_CONNS)
+        # получаем его ник
+        name = get_info(conn)
 
-        else:
-            conn.send(b'go away')
+        if name is None:
+            continue
+
+        name = name.decode('utf-8')
+        if name in context['connected_users']:
+            print(f'old client {name}')
+            continue
+
+        print(f'new client {name}')
+
+        # начинаем сессию чата
+        conn.send(b'ok')
+        context['connected_users'].add(name)
+        msg_ptr = 0
+        while True:
+            # если клиент не видел сообщения, которые есть у нас,
+            # отсылаем ему сообщения
+            if msg_ptr < len(context['messages']):
+                for msg in context['messages'][msg_ptr:]:
+                    print('tryna send an msg')
+                    conn.send(f'{msg}\n'.encode('utf-8'))
+                    print('sent an msg')
+                    msg_ptr += 1
+
+                # ждём сообщения от юзера
+            user_msgs = get_info(conn)
+            if user_msgs:
+                for msg in user_msgs.decode('utf-8').split('\n'):
+                    context['messages'].append(f'{name}: {msg}')
+                    msg_ptr += 1
+
+                # даём время поработать другим хэндлерам/серверу
+            await asyncio.sleep(CONN_WAIT_TIME)
 
 async def async_main():
     args = get_args()
