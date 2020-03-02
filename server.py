@@ -1,104 +1,90 @@
-import socket
-import argparse
+from typing import List
 import asyncio
 
-CONN_WAIT_TIME = 0.1
-MAX_CONNS = 5
+from worker_pool import WorkerPool
+from stream_jobs import get_from_stream, send_to_stream
+from graceful_shutdown import graceful_main as main
+
+from argparse import ArgumentParser
 
 def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-a", dest='addr', default='localhost')
-    parser.add_argument("-p", dest='port', default='4000')
-    parser.add_argument("-w", dest='workers', default='5')
+    ap = ArgumentParser('server')
+    ap.add_argument('-a', dest='addr', default='localhost')
+    ap.add_argument('-p', dest='port', default='4000')
 
-    return parser.parse_args()
+    return ap.parse_args()
 
-async def server(q: asyncio.Queue, addr, port):
-    # вся лабуда с сокетом
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind((addr, port))
-    s.settimeout(CONN_WAIT_TIME)
-    s.listen(MAX_CONNS)
+# корутина, которая рассылает сообщения от пользователя
+# другим пользователям
+async def broadcast_message(reader, msgs, msgs_context):
+    # сначала ждём, пока пользователь получит все старые сообщения
+    while not msgs_context['old_sent']:
+        await asyncio.sleep(0.1)
 
+    name = msgs_context['name']
     while True:
-        await asyncio.sleep(1)
-        try:
-            conn_addr = s.accept()
-            print('got a conn')
-            await q.put(conn_addr)
-        except socket.timeout: print('no new conns')
+        msg = await reader.readline()
+        if msg == b'':
+            break
 
+        msgs.append(f"{name}: {msg.decode('utf-8').rstrip()}")
+        msgs_context['ptr'] += 1
 
-# обёртка для того чтобы не работать с исключениями постоянно
-def get_info(s: socket.socket):
-    ret_val = None
+# корутина, которая посылате пользователю
+# сообщения других пользователей
+async def send_msgs(writer, msgs, msgs_context):
+    while True:
+        while msgs_context['ptr'] < len(msgs):
+            writer.write((msgs[msgs_context['ptr']] + '\n').encode('utf-8'))
+            msgs_context['ptr'] += 1
+
+        if not msgs_context['old_sent']:
+            msgs_context['old_sent'] = True
+
+        await writer.drain()
+        await asyncio.sleep(0.1)
+
+async def chat_session(conn_q, msgs: List[str]):
+    reader, writer = await conn_q.get()
+    # начинается сессия чатинга одного юзера со всеми другими
+
+    # получаем никнейм
+    name = (await reader.read(100)).decode('utf-8')
+
+    msgs_context = {'ptr': 0, 'old_sent': False, 'name': name}
+
     try:
-        ret_val = s.recv(1024)
-    except socket.timeout: ...
+        await asyncio.gather(
+            broadcast_message(reader, msgs, msgs_context),
+            send_msgs(writer, msgs, msgs_context),
+        )
+    # чтобы в случае отключения челика воркер, который обрабатывал
+    # это подключение не подыхал, а брался за следующее
+    except ConnectionResetError: ...
 
-    return ret_val
+def make_handler(conn_q):
+    async def handler(conn_reader, conn_writer):
+        await conn_q.put((conn_reader, conn_writer))
 
-async def handler(q: asyncio.Queue, context):
-    while True:
-        # ждём клиента
-        conn, addr = await q.get()
+    return handler
 
-        # как нашёлся клиент, начинаем для него сессию чата
-        conn.settimeout(CONN_WAIT_TIME)
-
-        # получаем его ник
-        name = get_info(conn)
-
-        if name is None:
-            continue
-
-        name = name.decode('utf-8')
-        if name in context['connected_users']:
-            print(f'old client {name}')
-            continue
-
-        print(f'new client {name}')
-
-        # начинаем сессию чата
-        conn.send(b'ok')
-        context['connected_users'].add(name)
-        msg_ptr = 0
-        while True:
-            # если клиент не видел сообщения, которые есть у нас,
-            # отсылаем ему сообщения
-            if msg_ptr < len(context['messages']):
-                for msg in context['messages'][msg_ptr:]:
-                    print('tryna send an msg')
-                    conn.send(f'{msg}\n'.encode('utf-8'))
-                    print('sent an msg')
-                    msg_ptr += 1
-
-                # ждём сообщения от юзера
-            user_msgs = get_info(conn)
-            if user_msgs:
-                for msg in user_msgs.decode('utf-8').split('\n'):
-                    context['messages'].append(f'{name}: {msg}')
-                    msg_ptr += 1
-
-                # даём время поработать другим хэндлерам/серверу
-            await asyncio.sleep(CONN_WAIT_TIME)
 
 async def async_main():
     args = get_args()
 
-    context = {
-        'connected_users': set(),
-        'messages': list(),
-    }
+    conn_q: asyncio.Queue[Conn] = asyncio.Queue()
 
-    q = asyncio.Queue()
+    msgs = []
+    wp = WorkerPool(5)
+    await wp.add_job(lambda: chat_session(conn_q, msgs))
+    await wp.add_job(lambda: chat_session(conn_q, msgs))
+    await wp.add_job(lambda: chat_session(conn_q, msgs))
+    await wp.add_job(lambda: chat_session(conn_q, msgs))
+    await wp.add_job(lambda: chat_session(conn_q, msgs))
 
-    coros = [server(q, args.addr, int(args.port))]
-    for _ in range(int(args.workers)):
-        coros.append(handler(q, context))
+    await asyncio.start_server(make_handler(conn_q), args.addr, args.port)
+    await wp.run()
 
-    # запускаем корутины
-    await asyncio.gather(*coros)
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(async_main())
+    main(async_main)

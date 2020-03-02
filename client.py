@@ -1,61 +1,43 @@
 import asyncio
-import argparse
-import socket
-import sys
 
-from aioconsole import ainput
+from aiostdio import make_stdio
+from worker_pool import WorkerPool
+from stream_jobs import get_from_stream, send_to_stream
+from graceful_shutdown import graceful_main as main
+
+from argparse import ArgumentParser
 
 def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-a", dest='addr', default='localhost')
-    parser.add_argument("-p", dest='port', default='4000')
-    parser.add_argument("-n", dest='name', default='guest')
+    ap = ArgumentParser('client')
+    ap.add_argument('-a', dest='addr', default='localhost')
+    ap.add_argument('-p', dest='port', default='4000')
+    ap.add_argument('-n', dest='name', default='guest')
 
-    return parser.parse_args()
-
-def get_info(s: socket.socket):
-    ret_val = None
-    try:
-        ret_val = s.recv(1024)
-    except socket.timeout: ...
-
-    return ret_val
-
-CONN_WAIT_TIME = 0.1
-
-async def printer(s: socket.socket):
-    while True:
-        msgs = get_info(s)
-        if msgs:
-            msgs = msgs.decode('utf-8')
-            for msg in msgs.split('\n'):
-                print(msg)
-            # sys.stdout.flush()
-
-        await asyncio.sleep(CONN_WAIT_TIME)
-
-# @asyncio.coroutine
-async def sender(s: socket.socket):
-    while True:
-        data = await ainput()
-        s.send(data[:-2].encode('utf-8'))
-
+    return ap.parse_args()
 
 async def async_main():
-    args = get_args()
+    stdin, stdout, closer = await make_stdio()
+    asyncio.create_task(closer())
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect((args.addr, int(args.port)))
+    conn_reader, conn_writer = await asyncio.open_connection(
+        (args := get_args()).addr, args.port)
 
-    s.send(args.name.encode('utf-8'))
-    ret_msg = s.recv(1024).decode('utf-8')
+    # посылаем имя
+    conn_writer.write(args.name.encode('utf-8'))
+    await conn_writer.drain()
 
-    if ret_msg == 'ok':
-        print('wow, my podklyuchilis')
-        s.settimeout(CONN_WAIT_TIME)
+    wp = WorkerPool(4)
 
-        await asyncio.gather(printer(s), sender(s))
+    msg_q: asyncio.Queue[str] = asyncio.Queue()
+    net_msg_q: asyncio.Queue[str] = asyncio.Queue()
 
+    await wp.add_job(lambda: get_from_stream(msg_q, stdin))
+    await wp.add_job(lambda: send_to_stream(msg_q, conn_writer))
+
+    await wp.add_job(lambda: get_from_stream(net_msg_q, conn_reader))
+    await wp.add_job(lambda: send_to_stream(net_msg_q, stdout))
+
+    await wp.run()
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(async_main())
+    main(async_main)
