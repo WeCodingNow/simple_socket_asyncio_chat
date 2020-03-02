@@ -3,6 +3,7 @@ import asyncio
 
 from async_utils.worker_pool import WorkerPool
 from async_utils.stream_jobs import get_from_stream, send_to_stream
+from async_utils.graceful_shutdown import stream_closer
 
 # types for linter
 Conn = Tuple[asyncio.StreamReader, asyncio.StreamWriter]
@@ -53,6 +54,7 @@ class ChatServer:
 
     async def _chat_session(self):
         reader, writer = await self.conn_q.get()
+        stream_closer(writer)
         # начинается сессия чатинга одного юзера со всеми другими
 
         # получаем никнейм
@@ -67,7 +69,7 @@ class ChatServer:
             )
         # чтобы в случае отключения челика воркер, который обрабатывал
         # это подключение не подыхал, а брался за следующее
-        except ConnectionResetError: ...
+        except ConnectionResetError: closer_task.cancel()
 
     async def _init_workers(self):
         await self.wp.add_job(self._chat_session)

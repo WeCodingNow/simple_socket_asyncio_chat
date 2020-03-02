@@ -15,10 +15,11 @@ class WorkerPool:
         self._make_tasks()
 
     def _make_tasks(self):
-        self._tasks = [
-            asyncio.create_task(self._worker(), name=f'worker_{i}')
-            for i in range(self.workers)
-        ]
+        self._workers = [self._worker() for i in range(self.workers)]
+        # self._tasks = [
+        #     asyncio.create_task(self._worker(), name=f'worker_{i}')
+        #     for i in range(self.workers)
+        # ]
 
     async def _worker(self):
         try:
@@ -36,9 +37,8 @@ class WorkerPool:
         await self.q.put(job_supplier)
 
     async def run(self):
-        for t in self._tasks:
-            await t
+        await asyncio.gather(*self._workers)
+        # for t in self._tasks:
+        #     await t
 
-    async def close(self):
-        for t in self._tasks:
-            t.cancel()
+    # async def close(self):

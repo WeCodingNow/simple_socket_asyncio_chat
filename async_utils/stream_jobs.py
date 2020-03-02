@@ -3,6 +3,10 @@ import asyncio
 # поставляет сообщения из потока в очередь сообщений
 async def get_from_stream(msg_q: asyncio.Queue, stream_in: asyncio.StreamReader):
     msg = await stream_in.read(100)
+
+    if msg == b'':
+        raise EOFError
+
     await msg_q.put(msg)
 
 # записывает новые сообщения из очереди сообщений в поток

@@ -6,14 +6,8 @@ import sys
 # из-за баги, которая описывается в https://bugs.python.org/issue38529
 # в питоне 3.8 всё равно приходит сообщение о том,
 # что мол мы не закрыли потоки
-async def stream_closer(stdout, stdin):
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        print('i am closing the streams')
-        stdout.close()
-        stdin.close()
+
+from .graceful_shutdown import stream_closer
 
 async def make_stdio(limit=asyncio.streams._DEFAULT_LIMIT, loop=None):
     if loop is None:
@@ -35,5 +29,6 @@ async def make_stdio(limit=asyncio.streams._DEFAULT_LIMIT, loop=None):
     writer = asyncio.streams.StreamWriter(
         writer_transport, writer_protocol, None, loop)
 
+    # stream_closer(writer)
 
-    return reader, writer, lambda: stream_closer(writer, reader)
+    return reader, writer

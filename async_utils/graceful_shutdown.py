@@ -1,11 +1,22 @@
+from typing import List, Union
+
 import asyncio
 import signal
+
+_streams_to_close: List[asyncio.StreamWriter] = []
+def stream_closer(stream: asyncio.StreamWriter):
+    _streams_to_close.append(stream)
 
 async def shutdown(signal, loop):
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     [task.cancel() for task in tasks]
 
     await asyncio.gather(*tasks, return_exceptions=True)
+
+    # закрываем все открытые потоки
+    for stream in _streams_to_close:
+        stream.close()
+        await stream.wait_closed()
 
     loop.stop()
 
