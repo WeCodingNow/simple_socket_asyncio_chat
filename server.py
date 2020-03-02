@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 import asyncio
 
 from worker_pool import WorkerPool
@@ -6,6 +6,9 @@ from stream_jobs import get_from_stream, send_to_stream
 from graceful_shutdown import graceful_main as main
 
 from argparse import ArgumentParser
+
+# types for linter
+Conn = Tuple[asyncio.StreamReader, asyncio.StreamWriter]
 
 def get_args():
     ap = ArgumentParser('server')
@@ -67,7 +70,6 @@ def make_handler(conn_q):
         await conn_q.put((conn_reader, conn_writer))
 
     return handler
-
 
 async def async_main():
     args = get_args()
