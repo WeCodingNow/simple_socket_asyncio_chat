@@ -1,11 +1,8 @@
 import asyncio
-
-from aiostdio import make_stdio
-from worker_pool import WorkerPool
-from stream_jobs import get_from_stream, send_to_stream
-from graceful_shutdown import graceful_main as main
-
 from argparse import ArgumentParser
+
+from async_utils.graceful_shutdown import graceful_main as main
+from async_chat import ChatClient
 
 def get_args():
     ap = ArgumentParser('client')
@@ -16,28 +13,9 @@ def get_args():
     return ap.parse_args()
 
 async def async_main():
-    stdin, stdout, closer = await make_stdio()
-    asyncio.create_task(closer())
+    args = get_args()
 
-    conn_reader, conn_writer = await asyncio.open_connection(
-        (args := get_args()).addr, args.port)
-
-    # посылаем имя
-    conn_writer.write(args.name.encode('utf-8'))
-    await conn_writer.drain()
-
-    wp = WorkerPool(4)
-
-    msg_q: asyncio.Queue[str] = asyncio.Queue()
-    net_msg_q: asyncio.Queue[str] = asyncio.Queue()
-
-    await wp.add_job(lambda: get_from_stream(msg_q, stdin))
-    await wp.add_job(lambda: send_to_stream(msg_q, conn_writer))
-
-    await wp.add_job(lambda: get_from_stream(net_msg_q, conn_reader))
-    await wp.add_job(lambda: send_to_stream(net_msg_q, stdout))
-
-    await wp.run()
+    await ChatClient(**vars(args)).run()
 
 if __name__ == "__main__":
     main(async_main)
