@@ -2,20 +2,10 @@ from typing import List, Tuple
 import asyncio
 
 from worker_pool import WorkerPool
-from stream_jobs import get_from_stream, send_to_stream
-from graceful_shutdown import graceful_main as main
-
-from argparse import ArgumentParser
+from async_utils.stream_jobs import get_from_stream, send_to_stream
 
 # types for linter
 Conn = Tuple[asyncio.StreamReader, asyncio.StreamWriter]
-
-def get_args():
-    ap = ArgumentParser('server')
-    ap.add_argument('-a', dest='addr', default='localhost')
-    ap.add_argument('-p', dest='port', default='4000')
-
-    return ap.parse_args()
 
 # корутина, которая рассылает сообщения от пользователя
 # другим пользователям
@@ -47,46 +37,45 @@ async def send_msgs(writer, msgs, msgs_context):
         await writer.drain()
         await asyncio.sleep(0.1)
 
-async def chat_session(conn_q, msgs: List[str]):
-    reader, writer = await conn_q.get()
-    # начинается сессия чатинга одного юзера со всеми другими
+class ChatServer:
+    def __init__(self, max_sessions, addr, port):
+        self.max_sessions = max_sessions
+        self.addr = addr
+        self.port = port
 
-    # получаем никнейм
-    name = (await reader.read(100)).decode('utf-8')
+        self.conn_q: asyncio.Queue[Conn] = asyncio.Queue()
+        self.wp = WorkerPool(max_sessions)
+        self.msgs = []
 
-    msgs_context = {'ptr': 0, 'old_sent': False, 'name': name}
+    async def _handler(self, conn_reader, conn_writer):
+        await self.conn_q.put((conn_reader, conn_writer))
 
-    try:
-        await asyncio.gather(
-            broadcast_message(reader, msgs, msgs_context),
-            send_msgs(writer, msgs, msgs_context),
-        )
-    # чтобы в случае отключения челика воркер, который обрабатывал
-    # это подключение не подыхал, а брался за следующее
-    except ConnectionResetError: ...
+    async def _chat_session(self):
+        reader, writer = await self.conn_q.get()
+        # начинается сессия чатинга одного юзера со всеми другими
 
-def make_handler(conn_q):
-    async def handler(conn_reader, conn_writer):
-        await conn_q.put((conn_reader, conn_writer))
+        # получаем никнейм
+        name = (await reader.read(100)).decode('utf-8')
 
-    return handler
+        msgs_context = {'ptr': 0, 'old_sent': False, 'name': name}
 
-async def async_main():
-    args = get_args()
+        try:
+            await asyncio.gather(
+                broadcast_message(reader, self.msgs, msgs_context),
+                send_msgs(writer, self.msgs, msgs_context),
+            )
+        # чтобы в случае отключения челика воркер, который обрабатывал
+        # это подключение не подыхал, а брался за следующее
+        except ConnectionResetError: ...
 
-    conn_q: asyncio.Queue[Conn] = asyncio.Queue()
+    async def _init_workers(self):
+        await self.wp.add_job(lambda: self._chat_session())
+        await self.wp.add_job(lambda: self._chat_session())
+        await self.wp.add_job(lambda: self._chat_session())
+        await self.wp.add_job(lambda: self._chat_session())
+        await self.wp.add_job(lambda: self._chat_session())
 
-    msgs = []
-    wp = WorkerPool(5)
-    await wp.add_job(lambda: chat_session(conn_q, msgs))
-    await wp.add_job(lambda: chat_session(conn_q, msgs))
-    await wp.add_job(lambda: chat_session(conn_q, msgs))
-    await wp.add_job(lambda: chat_session(conn_q, msgs))
-    await wp.add_job(lambda: chat_session(conn_q, msgs))
-
-    await asyncio.start_server(make_handler(conn_q), args.addr, args.port)
-    await wp.run()
-
-
-if __name__ == "__main__":
-    main(async_main)
+    async def run(self):
+        await self._init_workers()
+        await asyncio.start_server(self._handler, self.addr, self.port)
+        await self.wp.run()
